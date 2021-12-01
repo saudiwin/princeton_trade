@@ -1,0 +1,904 @@
+---
+title: "Replication of A Field Experiment on the U.S.-China Trade War Results"
+author: "Robert Kubinec"
+date: "December 1, 2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+require(tidyr)
+require(dplyr)
+require(ggplot2)
+require(readr)
+require(lubridate)
+require(stringr)
+require(margins)
+require(qualtRics)
+require(ggthemes)
+require(googlesheets4)
+require(modelsummary)
+require(RPostgres)
+
+# load data
+
+# this  code is not run for confidentiality reasons
+
+# qualtrics <- read_survey("data/U.S.+Firms+Outcome+Survey+-+API+Based_October+5,+2020_08.17.csv") %>% mutate(survey_type="Facebook") %>% 
+#   filter(Status!="Survey Preview")
+# 
+# ks <- read_survey("data/U.S.+Firms+Outcome+Survey+-+KC+Chamber_October+5,+2020_06.18.zip") %>% mutate(survey_type="Kansas City Chamber") %>% 
+#   filter(Status!="Survey Preview")
+
+ks <- readRDS("data/ks.rds")
+
+# note this doesn't contain any responses
+
+# phone <- read_survey("data/U.S.+Firms+Outcome+Survey+-+Phone_October+5,+2020_08.24.csv") %>% mutate(survey_type="Orbis Phone") %>% 
+#   filter(Status!="Survey Preview")
+# 
+# email <- read_survey("data/U.S.+Firms+Outcome+Survey_October+5,+2020_08.26.csv") %>% mutate(survey_type="Orbis Email") %>% 
+#   filter(Status!="Survey Preview")
+
+# need facebook valid variable
+
+# valid_fb <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1SlyYtROA6K1HIpx9MQ1QRhGyDpIkwfwebKGHguZ3b98/edit#gid=1263452815",
+#                                       sheet="Facebook")
+# 
+# qualtrics <- left_join(qualtrics,select(valid_fb, ResponseId,Valid))
+
+# only those who Lindsay paid
+# valid_zero <- filter(qualtrics, Valid==0)
+# # additinal set that Lindsay padi
+# valid_one <- filter(qualtrics,Valid==1)
+# # add in those considered valid
+# valid_maybe <- filter(qualtrics,Valid==0.5)
+# 
+# valid_most <- filter(qualtrics,Valid>0)
+
+valid_most <- readRDS("data/valid_most.rds")
+# 
+# # new survey responses
+# 
+# new_survey <- filter(qualtrics,StartDate>ymd("2020-10-01"))
+# 
+# # bind together into one dataset
+# 
+# combined_data <- bind_rows(list(`Full Dataset`=qualtrics,
+#                                 `Not Valid`=valid_zero,
+#                                 `Valid`=valid_one,
+#                                 `Maybe Valid`=valid_maybe,
+#                                 `Excluding Invalid`=valid_most,
+#                                 `New Survey`=new_survey),.id = "Type")
+
+combined_data <- readRDS("data/combined_data.rds")
+
+# combine paid valid all with ks survey, orbis survey and email data
+# for final analysis
+
+
+
+to_analyze <-readRDS("data/to_analyze.rds")
+# try to get the naics data out
+
+beapretties <- readRDS("data/beapretties.rds")
+
+knitr::opts_chunk$set(warning=FALSE,message=FALSE)
+
+```
+
+```{r getnaics,include=F}
+
+# see if we can join
+
+analyze_tariffs <- left_join(to_analyze,beapretties, by=c("naics_2"="naicsdesc")) %>% 
+  group_by(ResponseId) %>% 
+  mutate(prod_sum=sum(number),
+         total=sum(number>0),
+         mean_rate=mean(rate[number>0]),
+         mean_prop=mean(tariff_prop_weighted[number>0]),
+        prod_sum=prod_sum/100,
+        mean_rate=mean_rate/100) %>% 
+  distinct(ResponseId,prod_sum,mean_rate,mean_prop,.keep_all = T) %>% 
+  ungroup %>% 
+  # mutate(prod_sum=case_when(condition=="control_email"~0,
+  #   condition %in% c("dynamic_static","static") & is.na(prod_sum)~0,
+  #              condition %in% c("dynamic_static","static")~prod_sum,
+  #              TRUE~NA_real_),
+  #        mean_rate=case_when(condition=="control_email"~0,
+  #                            condition %in% c("dynamic_static","static") & is.na(mean_rate)~0,
+  #              condition %in% c("dynamic_static","static")~mean_rate,
+  #              TRUE~NA_real_),
+  #        mean_prop=case_when(condition=="control_email"~0,
+  #                            condition %in% c("dynamic_static","static") & is.na(mean_prop)~0,
+  #              condition %in% c("dynamic_static","static")~mean_prop,
+  #              TRUE~NA_real_),
+  #   total=case_when(condition=="control_email"~0L,
+  #                            condition %in% c("dynamic_static","static") & is.na(total)~0L,
+  #              condition %in% c("dynamic_static","static")~total,
+  #              TRUE~NA_integer_)) %>% 
+  ungroup %>% 
+  mutate(prod_sum=ifelse(condition %in% c("dynamic_static","static") & prod_sum==0,
+                        (-1*min(prod_sum[prod_sum>0],na.rm=T)),
+                        prod_sum))
+
+# plot treatment distribution
+
+analyze_tariffs %>% 
+  mutate(Treatment=(condition!="control_email"),
+         Treatment=factor(Treatment, labels=c("Control","Treatment"))) %>% 
+  filter(!is.na(condition)) %>% 
+  ggplot(aes(x=prod_sum*100)) +
+  geom_histogram() +
+  theme_tufte() +
+  facet_wrap(~Treatment,ncol=1,scales="free_y") +
+  labs(x="Number of Products with Tariffs in Respondent's Industry",
+       y="Count of Respondents")
+
+ggsave("figures/treathist.png",width=5, height=3)
+
+```
+
+
+
+We have different datasets depending on the level of validation we used. The validation column is unfortunately raw text so right now I am only using a simple text match in the `badresponse` column for the strings `bot` and `fake` and also including those who were paid in the first round. I also have a dataset of only those who were paid (first round) and all who were paid in the first and second rounds. Finally, I am also performing analyses for the full dataset as a reference point.
+
+# Descriptive Analysis
+
+First we can do some descriptive results. First for information about whether or not respondents know about tariffs by dataset type:
+
+```{r know_all}
+combined_data %>% 
+  ggplot(aes(x=factor(know_trade_1,
+                      levels=c("0","1","2","3","4","5","6","7","8","9","10")))) +
+  geom_bar() +
+  ggtitle("On a scale of 0 (very low) to 10 (very high),\nhow much information do you already have about how your \ncompany has been affected by the trade war?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("")
+
+ggsave("figures/compare_info.png")
+
+```
+
+
+It is not clear if there are any patterns here across the respondent validity. There are distinct modes at 0, 7, and 10. The full dataset has a higher mode at 7 than the other datasets.
+
+We can see a similar plot for the trade war's effect on the respondent's company:
+
+```{r trade_war_effect}
+combined_data %>% 
+  ggplot(aes(x=factor(hurt_trade_1,
+                      levels=c("0","1","2","3","4","5","6","7","8","9","10")))) +
+  geom_bar() +
+  ggtitle("On a scale of 0 (harmed) to 10 (helped), how has your company been affected by the trade tariffs that went into effect in over the past year?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("")
+
+ggsave("figures/compare_trade_war_hurt.png")
+```
+
+Here the distributions across the categories are even more equal regardless of respondent validity. There is a distinct mode at 5 and a lesser mode at 10 (people who are very positive about the trade war). 
+
+Here are the same descriptive statistics for several other pre-treatment questions:
+
+```{r other_stats}
+combined_data %>% 
+  ggplot(aes(x=factor(effective,
+                      levels=c("Not effective at all",
+                               "Somewhat ineffective",
+                               "Neither effective nor ineffective",
+                               "Somewhat effective",
+                               "Very effective")))) +
+  geom_bar() +
+  ggtitle("On the whole, would your company consider\nit an effective strategy to work\nwith other companies to advocate for a common trade policy?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("") + 
+  theme(axis.text.x = element_text(angle=90))
+
+combined_data %>% 
+  ggplot(aes(x=pol_action)) +
+  geom_bar() +
+  ggtitle("In the last five years, has your company ever taken\npolitical action on any issue?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("")
+
+combined_data %>% 
+  ggplot(aes(x=assoc)) +
+  geom_bar() +
+  ggtitle("Does your company participate\nin trade and business associations that advocate\nfor your industry?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("")
+
+bind_rows(list(Kansas=select(ks,pol_culture_1),
+               Facebook=select(valid_most,pol_culture_1)),.id="Type") %>% 
+  filter(!is.na(pol_culture_1)) %>% 
+  ggplot(aes(x=factor(pol_culture_1,
+                      levels=c("Very Liberal",
+                               "Liberal",
+                               "Moderate",
+                               "Conservative",
+                               "Very Conservative")))) +
+  geom_bar() +
+  ggtitle("How would you evaluate your company’s\npolitical culture among managers?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("") + 
+  ylab("No. Respondents") +
+  theme_tufte() +
+  theme(axis.text.x = element_text(angle=90))
+
+ggsave("figures/pol_culture_managers_compare.png")
+
+combined_data %>% 
+  ggplot(aes(x=factor(pol_culture_2,
+                      levels=c("Very Liberal",
+                               "Liberal",
+                               "Moderate",
+                               "Conservative",
+                               "Very Conservative")))) +
+  geom_bar() +
+  ggtitle("How would you evaluate your company’s\npolitical culture among rank and file employees?") +
+  facet_wrap(~Type,scales="free_y") +
+  xlab("") + 
+  theme(axis.text.x = element_text(angle=90))
+
+```
+
+Again, we're not seeing very strong effects due to validation type. The full dataset (absent bots) are more likely to be politically active. 
+
+# Treatment
+
+Now I will look at the treatment. In our current survey we have treatments for taking supporting and opposing stances in response to the data shown. We can count the number of possible actions taken and use the treatment condition as a predictor to see what the results are.
+
+After munging the data, I first run a model with the treatments predicting opposing the trade war as a binary variable where 1 equals the respondent selecting at least one opposition outcome. Whether or not the respondent was in the paid/and or not bot category is included as a control.
+
+```{r rework_treatment}
+# need to split the treatment variable
+to_analyze <- to_analyze %>% 
+  mutate(support_fb=grepl("Facebook",outcome_support),
+         support_congress_donate=grepl("Donate to Congress",outcome_support),
+         support_petition=grepl("Petition",outcome_support),
+         support_invite=grepl("Invite",outcome_support),
+         oppose_fb=grepl("Facebook",outcome_oppose),
+        oppose_congress_donate=grepl("Donate to Congress",outcome_oppose),
+        oppose_petition=grepl("Petition",outcome_oppose),
+        oppose_invite=grepl("Invite",outcome_oppose),
+        oppose_congress_ask=grepl("Ask your Congress",outcome_oppose),
+        oppose_gov=grepl("governor",outcome_oppose),
+        support_any=as.numeric(support_fb|support_congress_donate|support_petition),
+        oppose_any=as.numeric(oppose_fb|oppose_congress_donate|oppose_congress_ask|oppose_petition|oppose_congress_ask|oppose_gov),
+        oppose_any_view=as.numeric(outcomtype=="Oppose")) %>% 
+  filter(!is.na(manager))
+
+supp_mod_list <- list(Facebook=glm(support_fb~condition + manager,family="binomial",data=to_analyze),
+                 Congress=glm(support_congress_donate~condition,family="binomial",data=to_analyze),
+                 Petition=glm(support_petition~condition,family="binomial",data=to_analyze),
+                 Invite=glm(support_invite~condition,family="binomial",data=to_analyze),
+                 Any=glm(support_any~condition,family="binomial",data=to_analyze))
+
+opp_mod_list <- list(Facebook=glm(oppose_fb~condition,family="binomial",data=to_analyze),
+                 Congress=glm(oppose_congress_ask~condition,family="binomial",data=to_analyze),
+                 Petition=glm(oppose_petition~condition,family="binomial",data=to_analyze),
+                 Invite=glm(oppose_invite~condition,family="binomial",data=to_analyze),
+                 Governor=glm(oppose_gov~condition,family="binomial",data=to_analyze),
+                 Any=glm(oppose_any~condition,family="binomial",data=to_analyze))
+
+```
+
+```{r allsupp}
+
+modelsummary(supp_mod_list,output="tables/all_supp.tex",stars=T,
+             fmt=3,
+             title="Disaggregated Treatments for Any Support Trade War Item Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
+
+```{r allopp}
+
+modelsummary(opp_mod_list,output="tables/all_opp.tex",stars=T,
+             fmt=3,
+             title="Disaggregated Treatments for Any Oppose Trade War Item Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
+
+
+
+Now redo the same models but collapse treatments:
+
+```{r collapse}
+
+to_analyze <- mutate(to_analyze,condition_collapse=ifelse(condition %in% c("static","dynamic",
+                                                                  "dynamic_static"),
+                                                 "Treatment","Control"),
+                     condition_collapse=factor(condition_collapse,levels=c("Control","Treatment")))
+
+supp_mod_list_collapse <- list(Facebook=glm(support_fb~condition_collapse,family="binomial",data=to_analyze),
+                 Congress=glm(support_congress_donate~condition_collapse,family="binomial",data=to_analyze),
+                 Petition=glm(support_petition~condition_collapse,family="binomial",data=to_analyze),
+                 Invite=glm(support_invite~condition_collapse,family="binomial",data=to_analyze),
+                 Any=glm(support_any~condition_collapse,family="binomial",data=to_analyze))
+
+opp_mod_list_collapse <- list(Facebook=glm(oppose_fb~condition_collapse,family="binomial",data=to_analyze),
+                 Congress=glm(oppose_congress_ask~condition_collapse,family="binomial",data=to_analyze),
+                 Petition=glm(oppose_petition~condition_collapse,family="binomial",data=to_analyze),
+                 Invite=glm(oppose_invite~condition_collapse,family="binomial",data=to_analyze),
+                 Governor=glm(oppose_gov~condition_collapse,family="binomial",data=to_analyze),
+                 Any=glm(oppose_any~condition_collapse,family="binomial",data=to_analyze))
+
+```
+
+```{r collapseopp}
+
+modelsummary(opp_mod_list_collapse,output="tables/collapse_opp.tex",stars=T,
+             title="Collapsed Treatments for Any Oppose Trade War Item Selected",
+             fmt=3,
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
+
+```{r collapsesupp}
+
+modelsummary(supp_mod_list_collapse,output="tables/collapse_supp.tex",stars=T,
+             title="Collapsed Treatments for Any Support Trade War Item Selected",
+             fmt=3,
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
+
+
+Also collapse by counting outcomes:
+
+```{r count}
+
+do_count <- function(outcome) {
+  
+  outcome_split <- stringr::str_split(outcome,pattern=",")
+  
+  outcome_split <- sapply(outcome_split, function(l) {
+    
+   if(is.na(l[[1]])) {
+      return(0)
+    } else if(l[[1]]=="None of the above") {
+      return(0)
+    }  else {
+      return(length(unique(l)))
+    }
+  })
+  
+  outcome_split
+  
+}
+
+to_analyze <- mutate(to_analyze,count_support=do_count(outcome_support),
+                     count_oppose=do_count(outcome_oppose))
+
+supp_mod_count <- list(Oppose=glm(count_oppose~condition,family="gaussian",data=to_analyze),
+                               Support=glm(count_support~condition,family="gaussian",data=to_analyze),
+                 `Collapse Oppose`=glm(count_oppose~condition_collapse,family="gaussian",data=to_analyze),
+                `Collapse Support`=glm(count_support~condition_collapse,family="gaussian",data=to_analyze))
+
+
+modelsummary(supp_mod_count,stars=T,
+             output="tables/count_mods.tex",
+             title="Models of Count of Outcome Items Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
+
+# Interactions with Strength of Treatment
+
+
+```{r strength_treatment}
+# need to split the treatment variable
+analyze_tariffs <- analyze_tariffs %>% 
+  ungroup %>% 
+  mutate(condition_collapse=factor(as.numeric(condition!="control_email"),
+                                   labels=c("Control","Treatment")),
+         support_fb=grepl("Facebook",outcome_support),
+         support_congress_donate=grepl("Donate to Congress",outcome_support),
+         support_petition=grepl("Petition",outcome_support),
+         support_invite=grepl("Invite",outcome_support),
+         oppose_fb=grepl("Facebook",outcome_oppose),
+        oppose_congress_donate=grepl("Donate to Congress",outcome_oppose),
+        oppose_petition=grepl("Petition",outcome_oppose),
+        oppose_invite=grepl("Invite",outcome_oppose),
+        oppose_congress_ask=grepl("Ask your Congress",outcome_oppose),
+        oppose_gov=grepl("governor",outcome_oppose),
+        count_support=do_count(outcome_support),
+        count_oppose=do_count(outcome_oppose),
+        hurt2=as.numeric(hurt_trade_1) - 5,
+        new_out=case_when(condition=="control_email"~0,
+                          total==0~-1,
+                          TRUE~as.numeric(total))) %>% 
+      group_by(ResponseId) %>% 
+        mutate(support_any=any(support_fb,support_congress_donate,support_petition) & !any(oppose_fb,oppose_congress_donate,oppose_congress_ask,oppose_petition,oppose_congress_ask,oppose_gov),
+        oppose_any=any(oppose_fb,oppose_congress_donate,oppose_congress_ask,oppose_petition,oppose_congress_ask,oppose_gov) & !any(support_fb,support_congress_donate,support_petition),
+        oppose_any_view=as.numeric(outcomtype=="Oppose"),
+        condition2=recode(condition,dynamic_static="static")) %>% 
+  filter(!is.na(manager))
+
+supp_mod_list <- list(Facebook=glm(support_fb~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Congress=glm(support_congress_donate~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Petition=glm(support_petition~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Invite=glm(support_invite~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Any=glm(support_any~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Count=glm(count_support~(prod_sum*condition_collapse)/(hurt2),family="gaussian",data=analyze_tariffs))
+
+opp_mod_list <- list(Facebook=glm(oppose_fb~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Congress=glm(oppose_congress_ask~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Petition=glm(oppose_petition~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Invite=glm(oppose_invite~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Governor=glm(oppose_gov~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Any=glm(oppose_any~(prod_sum*condition_collapse)/(hurt2),family="binomial",data=analyze_tariffs),
+                 Count=glm(count_oppose~(prod_sum*condition_collapse)/(hurt2),family="gaussian",data=analyze_tariffs))
+
+```
+
+```{r modtreat}
+
+modelsummary(supp_mod_list,stars=T,
+             fmt=3,
+             title="Treatment Strength: Support Trade War")
+
+modelsummary(supp_mod_list,output="tables/mod_treat_supp.tex",stars=T,
+             fmt=3,
+             title="Treatment Strength: Support Trade War \\label{intsupp}",
+             coef_rename = c(prod_sum="Products",
+                             `prod_sum:hurt2`="$\\frac{\\text{Products}}{\\text{Prior Hurt}}$"),
+             escape=F)
+
+```
+
+```{r treatmodopp}
+
+modelsummary(opp_mod_list,stars=T,
+             fmt=3,
+             title="Treatment Strength: Oppose Trade War",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+modelsummary(opp_mod_list,output="tables/mod_treat_opp.tex",stars=T,
+             fmt=3,
+             title="Treatment Strength: Oppose Trade War  \\label{intoppose}",
+             coef_rename = c(prod_sum="Products",
+                             `prod_sum:hurt2`="$\\frac{\\text{Products}}{\\text{Prior Hurt}}$"),
+             escape=F)
+
+```
+
+Do some margins plotting.
+
+```{r margsupport}
+
+require(margins)
+
+min_prod_sum <- min(analyze_tariffs$prod_sum[analyze_tariffs$total>0], na.rm=T)
+max_prod_sum <- max(analyze_tariffs$prod_sum[analyze_tariffs$total>0], na.rm=T)
+min_mean_rate <- min(analyze_tariffs$mean_rate[analyze_tariffs$total>0], na.rm=T)
+max_mean_rate <- max(analyze_tariffs$mean_rate[analyze_tariffs$total>0], na.rm=T)
+min_hurt2 <- min(analyze_tariffs$hurt2, na.rm=T)
+max_hurt2 <- max(analyze_tariffs$hurt2, na.rm=T)
+
+# support_any_margins <- margins(supp_mod_list$Any,at=list(prod_sum=seq(min_prod_sum,max_prod_sum,length.out=10),
+#                                                          hurt2=seq(min_hurt2,max_hurt2,length.out=10)))
+
+require(margins)
+
+support_any_pred <- summary(margins(supp_mod_list$Any,variables="condition_collapse",at=list(prod_sum=seq(min_prod_sum,max_prod_sum,length.out=10),
+                                                         hurt2=seq(min_hurt2,max_hurt2,length.out=10)),vce="delta"))
+                                                         #mean_rate=seq(min_mean_rate,max_mean_rate,length.out=10),
+                                                         
+p1 <- support_any_pred %>% 
+  ggplot(aes(y=prod_sum*100,
+             x=hurt2)) +
+  geom_raster(aes(fill=AME)) +
+  scale_fill_viridis_c(option="magma") +
+    scale_x_continuous(breaks=c(-5,-3,0,3,5),
+                     labels=c("Hurt","-3","0","3","Helped")) +
+  ggtitle("Support Trade War") +
+  guides(fill="none") +
+  #facet_wrap(~`at(condition_collapse)`) +
+  labs(y="Products with Tariff",x="Prior Belief in Trade War") +
+  theme_tufte()
+
+oppose_any_pred <- margins(opp_mod_list$Any,
+                           variable="condition_collapse",
+                           at=list(prod_sum=seq(min_prod_sum,max_prod_sum,length.out=10),
+                                                         hurt2=seq(min_hurt2,max_hurt2,length.out=10)),vce="delta") %>% 
+  summary
+
+p2 <- oppose_any_pred %>% 
+  ggplot(aes(y=prod_sum*100,
+             x=hurt2)) +
+  geom_raster(aes(fill=AME)) +
+  scale_fill_viridis_c(option="magma") +
+  ggtitle("Oppose Trade War") +
+  guides(fill=guide_colorbar(title="LATE"))+
+  #facet_wrap(~`at(condition_collapse)`) +
+  scale_x_continuous(breaks=c(-5,-3,0,3,5),
+                     labels=c("Hurt","-3","0","3","Helped")) +
+  theme_tufte() +
+  labs(y="",x="Prior Belief in Trade War")
+
+require(patchwork)
+
+p1 + p2 + plot_layout(guides="collect") & theme(legend.position = "bottom")
+
+ggsave("figures/strength_treat.png")
+
+ggsave("figures/strength_treat_ppt.png",width=6,height=3)
+
+```
+
+
+
+# Interaction with Pre-treatment Beliefs
+
+Crucially, we wanted to test whether or not respondents' pre-existing beliefs matter for the effect of the treatment. We in particular hypothesized a curvilinear relationship between beliefs and the outcome. Here I will only analyze the `to_analyze` data.
+
+```{r treatment_int_hurt}
+
+# rework paid-valid-all data
+
+to_analyze <- to_analyze %>%   
+    mutate(hurt_trade_1=as.numeric(hurt_trade_1))
+
+# run linear interaction model
+
+linear_mod <-  glm(oppose_any~condition_collapse*hurt_trade_1,data=to_analyze)
+
+# run curvilinear
+
+out_mod_curv <- glm(formula=oppose_any ~ condition_collapse*hurt_trade_1 + condition_collapse*(I(hurt_trade_1^2)),
+      data=to_analyze,family="binomial") 
+
+# look at marginal effects
+
+margin_curv_oppose <- margins(out_mod_curv,at = list(hurt_trade_1=seq(0,10,by=1))) %>%
+    summary
+
+margin_curv_oppose %>% 
+  filter(factor=="condition_collapseTreatment") %>% 
+  ggplot(aes(y=AME,x=hurt_trade_1)) +
+  geom_ribbon(aes(ymin=lower,ymax=upper),fill="blue",alpha=0.5) +
+  geom_line(linetype=2,aes(group=factor)) +
+  geom_hline(linetype=3,yintercept=0) +
+  theme_tufte() +
+  xlab(stringr::str_wrap("On a scale of 0 (harmed) to 10 (helped), how has your company been affected by the trade tariffs that went into effect in over the past year?"))
+
+ggsave("figures/quad_oppose.png")
+
+# same but for support
+
+# run linear interaction model
+
+linear_mod_supp <-  glm(support_any~condition_collapse*hurt_trade_1,data=to_analyze)
+
+# run curvilinear
+
+out_mod_curv_supp <- glm(formula=support_any ~ condition_collapse*hurt_trade_1 + condition_collapse*(I(hurt_trade_1^2)),
+      data=to_analyze,family="binomial") 
+
+# look at marginal effects
+
+margin_curv_support <- margins(out_mod_curv_supp,at = list(hurt_trade_1=seq(0,10,by=1))) %>%
+    summary
+
+margin_curv_support %>% 
+  filter(factor=="condition_collapseTreatment") %>% 
+  ggplot(aes(y=AME,x=hurt_trade_1)) +
+  geom_ribbon(aes(ymin=lower,ymax=upper),fill="blue",alpha=0.5) +
+  geom_line(linetype=2,aes(group=factor)) +
+  geom_hline(linetype=3,yintercept=0) +
+  theme_tufte() +
+  xlab(stringr::str_wrap("On a scale of 0 (harmed) to 10 (helped), how has your company been affected by the trade tariffs that went into effect in over the past year?"))
+
+ggsave("figures/quad_support.png")
+
+```
+
+Interestingly, there are non-linear patterns, though not necessarily those we expect. For the static condition, those who believe that the trade war is very helpful or very hurtful are more likely to oppose the trade war conditional on receiving the treatment:
+
+```{r margins_plot}
+# cycle over values of the predictors calculated over average predictions for the data
+
+over_beliefs_static <- margins(out_mod_curv,
+                              variable="condition_collapse",
+                              at=list(hurt_trade_1=seq(0,10,by=0.1)))
+sum_pred <- summary(over_beliefs_static)
+
+sum_pred %>% 
+  ggplot(aes(y=AME,x=hurt_trade_1)) +
+  geom_line(linetype=2) +
+  geom_ribbon(aes(ymin=lower,ymax=upper,fill="blue"),alpha=0.5) +
+  #geom_ribbon(data=just_cont,aes(ymin=lower,ymax=upper),fill="red",alpha=0.5) +
+  geom_hline(yintercept = 0,linetype=3) +
+  theme_minimal() +
+  xlab("Prior Beliefs about Trade War") + 
+  ylab("Probability of Opposing Trade War") + 
+  scale_y_continuous(labels=scales::percent) + 
+    scale_x_continuous(breaks=c(1,3,5,7,10),
+                     labels=c("Hurt","3","5","7","Helped")) +
+  guides(fill="none",
+         linetype="none",
+         colour="none") +
+  ggthemes::theme_tufte()
+  #ggtitle("Effect of Treatment on Probability of Selecting Outcome Opposing Trade War",
+          #subtitle = "Subset by Question: How Has Your Company Been Affected\nby the Trade Tariffs That Went Into Effect Last Year?")
+
+ggsave("figures/treat_hurt_trade.png",width=5,height=4)
+```
+
+
+We can also investigate an interaction concerning *how much people know about the trade war*. 
+
+
+```{r know_int}
+
+# run curvilinear
+to_analyze$know_trade_1 <- as.numeric(to_analyze$know_trade_1)
+
+out_mod_know <- glm(formula=oppose_any ~ condition_collapse*know_trade_1*hurt_trade_1,
+      data=to_analyze,family="binomial") 
+
+# need to export model results for both curvilinear models
+
+modelsummary(list(`Figure 4`=out_mod_curv,
+                  `Figure 5`=out_mod_know),
+                  stars=T,
+             output="tables/out_mod_curv.tex",
+             title="Curvilinear Interaction LATEs Coefficients for Figure 4",
+             coef_rename = c(condition_collapseTreatment="Treatment",
+                             hurt_trade_1="Hurt",
+                             know_trade_1="Knowledge",
+                             `I(hurt_trade_1^2)`="Hurt$^2$", 
+                             `condition_collapseTreatment:know_trade_1`="Knowledge X Treatment",
+                             `condition_collapseTreatment:hurt_trade_1`="Hurt X Treatment",
+                             `know_trade_1:hurt_trade_1`="Knowledge X Hurt",
+ `condition_collapseTreatment:I(hurt_trade_1^2)`="Hurt$^2$ X Treatment",
+ `condition_collapseTreatment:know_trade_1:hurt_trade_1`="Treatment X Knowledge X Hurt"))
+
+
+```
+
+```{r margins_biv}
+# cycle over values of the predictors calculated over average predictions for the data
+
+all_trade <- expand.grid(know_trade_1=seq(0,10,by=0.1),
+                         hurt_trade_1=seq(0,10,by=0.1))
+
+over_beliefs_biv1 <- parallel::mclapply(1:nrow(all_trade), function(s) {
+  
+  print(s)
+  
+  out_d <- summary(margins(out_mod_know,variable="condition_collapse",
+                            at=list(know_trade_1=all_trade$know_trade_1[s],
+                                  hurt_trade_1=all_trade$hurt_trade_1[s])))
+  
+  return(out_d)
+  
+},mc.cores = 3) 
+  
+
+sum_pred <- bind_rows(over_beliefs_biv1)
+
+# just_cont <- filter(sum_pred,`at(condition)`=="control_email") %>% 
+#   select(-`at(condition)`)
+
+lab_data <- tibble(x = c(5,5,5,5),
+           y=c(1,8,1,8),
+           colour=rep(c("white",'black'),2),
+           label=c(c("Low information","High information"),
+                   c("Low information","High information")),
+           condition_collapse=c("Control","Control","Treatment","Treatment"))
+
+ggplot(sum_pred,aes(y=know_trade_1,x=hurt_trade_1)) +
+  geom_raster(aes(fill=AME)) +
+  scale_fill_viridis_c(option="magma") +
+  theme_tufte() +
+  xlab("Helped by Trade War") + 
+  geom_text(data=lab_data,aes(y=y,x=x,label=label,colour=colour),
+            family = "serif",size=4) +
+  scale_color_manual(values=c("black"="black","white"="white")) +
+  ylab("Knowledge of Trade War") + 
+      scale_x_continuous(breaks=c(1,3,5,7,10),
+                     labels=c("Hurt","3","5","7","Helped")) +
+        scale_y_continuous(breaks=c(0,3,5,7,10),
+                     labels=c("Less\nKnowledge","3","5","7","More\nKnowledge")) +
+  guides(fill=guide_colorbar(title="Pr(Oppose)"),colour="none") +
+  theme(panel.grid=element_blank())
+
+ggsave("figures/both_know_hurt_trade.png",width=5,height=4)
+```
+
+
+These results suggest that the more people know about the trade war, the less likely they are to respond to the treatment (which makes sense as the information is less new to them).
+
+Finally we can look at a three-way interaction between the treatment, knowing about the trade war and believing the trade war is harmful. Here I recode the treatment into a binary variable to increase power:
+
+
+This one is tricky of course to interpret but the sign on the last interaction term suggests that as knowledge about tariffs and beliefs in the beneficial aspects of tariffs both increase, respondents are *more* likely to oppose the tariffs conditional on receiving information. So this result (though imprecise) suggests some initial support for our hypothesis.
+
+# Final Interaction: Political Beliefs
+
+Political beliefs seem to have a strong effect on beliefs about trade.
+
+```{r polmod}
+
+to_analyze <- mutate(to_analyze,pol_culture_num=as.numeric(factor(pol_culture_1,
+                                                     levels=c("Very Conservative",
+                                                              "Conservative",
+                                                              "Moderate",
+                                                              "Liberal",
+                                                              "Very Liberal"))),
+                     moderate=as.numeric(pol_culture_1=="Moderate"))
+
+pol_managers <- glm(oppose_any ~ pol_culture_1,data=to_analyze,
+                    family="binomial")
+
+pol_rank_file <- glm(oppose_any ~ pol_culture_2,data=to_analyze,
+                    family="binomial")
+
+# get predictions
+
+predict_man <- summary(prediction(pol_managers,at=list(pol_culture_1=c("Very Conservative",
+                                                               "Conservative",
+                                                               "Moderate",
+                                                               "Liberal",
+                                                               "Very Liberal")))) %>% 
+  mutate(type="Managers") %>% 
+  select(estimate=`at(pol_culture_1)`,everything())
+
+predict_rank <- summary(prediction(pol_rank_file,at=list(pol_culture_2=c("Very Conservative",
+                                                               "Conservative",
+                                                               "Moderate",
+                                                               "Liberal",
+                                                               "Very Liberal")))) %>% 
+  mutate(type="Rank and File") %>% 
+  select(estimate=`at(pol_culture_2)`,everything())
+
+bind_rows(predict_rank,predict_man) %>% 
+  ggplot(aes(y=Prediction,x=estimate)) +
+  geom_pointrange(aes(ymin=lower,ymax=upper,colour=type,
+                      shape=type),position = position_dodge(width=.5)) +
+  scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+  theme_tufte() +
+  scale_color_colorblind(name="") +
+  guides(shape=guide_legend(title="")) +
+  labs(y="Percent Choosing Oppose Trade War",
+       x="")
+
+ggsave("figures/politics_trade.png",width=6.5,height=3)
+
+
+```
+
+# Influences of Trade War Knowledge
+
+In this section, I look at what might be driving respondents to have lower or higher levels of trade war knowledge. 
+
+First I can look at predictors of the 1 to 10 scale of trade war knowledge:
+
+```{r tradeknowpred}
+
+# fit models with OLS
+
+fit_knowl <- lm(know_trade_1~manager +  assoc + pol_action + action_tariff + pol_culture_1 ,data=to_analyze)
+fit_help <- lm(hurt_trade_1~manager +  assoc + pol_action + action_tariff + pol_culture_1 ,data=to_analyze)
+modelsummary(list(Knowledge=fit_knowl,Efficacy=fit_help),
+              stars=T,
+             output="tables/learn_pred_tab.tex",
+             title="Predictors of Beliefs about Trade War Knowledge and Efficacy")
+
+```
+
+Second, we can see if the  number of actual tariffs predicts beliefs in efficacy:
+
+```{r tarreff}
+
+tar_mod_lm <- lm(prod_sum ~ hurt_trade_1 + I(hurt_trade_1^2),data=filter(analyze_tariffs,!is.na(prod_sum)))
+modelsummary(tar_mod_lm,
+             output="tables/tariff_mod.tex",
+             title="Prior Beliefs about Effect of Trade War as Predictor of Count  of Input Products with Tariffs ",
+                  stars = T)
+
+# calculate margins
+
+tar_marg <- margins(tar_mod_lm,variables = "hurt_trade_1", at=list(hurt_trade_1=seq(0, 10, by=1)))
+
+summary(tar_marg)
+
+```
+
+## Robustness
+
+Here we replicate the main results and check for robustness to 1) dropping people who did not report a sector (other) and 2) using a stricter criterion for what counts as a business. We will focus here on the main reported models (i.e. the ATEs).
+
+```{r other}
+
+to_analyze_no_other <- filter(to_analyze,naics_1!="Other Services (except Public Administration)")
+
+supp_mod_list_other <- list(Facebook=glm(support_fb~condition + manager,family="binomial",data=to_analyze_no_other),
+                 Congress=glm(support_congress_donate~condition,family="binomial",data=to_analyze_no_other),
+                 Petition=glm(support_petition~condition,family="binomial",data=to_analyze_no_other),
+                 Invite=glm(support_invite~condition,family="binomial",data=to_analyze_no_other),
+                 Any=glm(support_any~condition,family="binomial",data=to_analyze_no_other))
+
+opp_mod_list_other <- list(Facebook=glm(oppose_fb~condition,family="binomial",data=to_analyze_no_other),
+                 Congress=glm(oppose_congress_ask~condition,family="binomial",data=to_analyze_no_other),
+                 Petition=glm(oppose_petition~condition,family="binomial",data=to_analyze_no_other),
+                 Invite=glm(oppose_invite~condition,family="binomial",data=to_analyze_no_other),
+                 Governor=glm(oppose_gov~condition,family="binomial",data=to_analyze_no_other),
+                 Any=glm(oppose_any~condition,family="binomial",data=to_analyze_no_other))
+
+modelsummary(supp_mod_list_other,output="tables/all_supp_other.tex",stars=T,
+             fmt=3,
+             title="Disaggregated Treatments for Any Support Trade War Item Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+modelsummary(opp_mod_list_other,output="tables/all_opp_other.tex",stars=T,
+             fmt=3,
+             title="Disaggregated Treatments for Any Support Trade War Item Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
+
+```{r strict}
+
+to_analyze_strict <- filter(to_analyze,Valid==1)
+
+supp_mod_list_strict <- list(Facebook=glm(support_fb~condition + manager,family="binomial",data=to_analyze_strict),
+                 Congress=glm(support_congress_donate~condition,family="binomial",data=to_analyze_strict),
+                 Petition=glm(support_petition~condition,family="binomial",data=to_analyze_strict),
+                 Invite=glm(support_invite~condition,family="binomial",data=to_analyze_strict),
+                 Any=glm(support_any~condition,family="binomial",data=to_analyze_strict))
+
+opp_mod_list_strict <- list(Facebook=glm(oppose_fb~condition,family="binomial",data=to_analyze_strict),
+                 Congress=glm(oppose_congress_ask~condition,family="binomial",data=to_analyze_strict),
+                 Petition=glm(oppose_petition~condition,family="binomial",data=to_analyze_strict),
+                 Invite=glm(oppose_invite~condition,family="binomial",data=to_analyze_strict),
+                 Governor=glm(oppose_gov~condition,family="binomial",data=to_analyze_strict),
+                 Any=glm(oppose_any~condition,family="binomial",data=to_analyze_strict))
+
+modelsummary(supp_mod_list_strict,output="tables/all_supp_strict.tex",stars=T,
+             fmt=3,
+             title="Disaggregated Treatments for Any Support Trade War Item Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+modelsummary(opp_mod_list_strict,output="tables/all_opp_strict.tex",stars=T,
+             fmt=3,
+             title="Disaggregated Treatments for Any Support Trade War Item Selected",
+             coef_rename = c(conditiondynamic="Dynamic",
+                             conditiondynamic_static="Dynamic + Static",
+                             conditionstatic="Static",managerYes="Manager",
+                             condition_collapseTreatment="Collapsed"))
+
+```
