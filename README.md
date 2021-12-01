@@ -7,3 +7,6 @@ This Github repository contains the code and data necessary to fully replicate t
   - `main.tex` - This is the Latex code for our article.
   - `data/` - The data folder contains 4 de-identified datasets from our paper. It also includes `beapretties.rds`, which is our dataset of input tariff amounts used in the experiment. All files are saved as R data objects (RDS) files.
   - Additional plots/images are included for the paper.
+
+
+If you find any errors or have other issues, please post an issue in this repository! (Click on the `Issues` tab above).
